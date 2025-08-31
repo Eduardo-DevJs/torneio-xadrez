@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import LZString from "lz-string";
 import { useLocalStorage } from "./utils/UseLocalStorage";
 import { buildBracket } from "./utils/buildBracket";
@@ -13,7 +13,7 @@ import { RoundColumn } from "./components/RoundColumn";
 
 const { compressToEncodedURIComponent, decompressFromEncodedURIComponent } =
   LZString;
-// ---------- Utils ----------
+
 const nowISO = () => new Date().toISOString().slice(0, 16);
 
 // ---------- App ----------
@@ -140,6 +140,28 @@ export default function App() {
     const cleared = clearDownstream(R, roundIndex, matchIndex);
     setState((s) => ({ ...s, rounds: cleared }));
   }
+
+  const containerRef = useRef(null);
+  const [isDown, setIsDown] = useState(false);
+  const [startX, setStartX] = useState(0);
+  const [scrollLeft, setScrollLeft] = useState(0);
+
+  const handleMouseDown = (e) => {
+    setIsDown(true);
+    setStartX(e.pageX - containerRef.current.offsetLeft);
+    setScrollLeft(containerRef.current.scrollLeft);
+  };
+
+  const handleMouseLeave = () => setIsDown(false);
+  const handleMouseUp = () => setIsDown(false);
+
+  const handleMouseMove = (e) => {
+    if (!isDown) return;
+    e.preventDefault();
+    const x = e.pageX - containerRef.current.offsetLeft;
+    const walk = (x - startX) * 1; // multiplicador da velocidade
+    containerRef.current.scrollLeft = scrollLeft - walk;
+  };
 
   // Agendamento
   function scheduleRounds() {
@@ -657,7 +679,19 @@ export default function App() {
                 Gere as chaves para visualizar o chaveamento.
               </div>
             ) : (
-              <div className="flex items-start gap-4 pb-8 min-w-max">
+              <div
+                style={{ overflow: "hidden" }}
+                ref={containerRef}
+                onMouseDown={handleMouseDown}
+                onMouseLeave={handleMouseLeave}
+                onMouseUp={handleMouseUp}
+                onMouseMove={handleMouseMove}
+                className="
+    grid grid-cols-1 gap-4 pb-8 w-full
+
+    md:flex md:items-start md:gap-4 md:overflow-x-auto md:cursor-grab md:select-none
+  "
+              >
                 {state.rounds.map((matches, rIdx) => (
                   <RoundColumn
                     key={rIdx}
