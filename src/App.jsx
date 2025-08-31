@@ -1,431 +1,20 @@
-import React, { useEffect, useMemo, useState } from "react";
-import LZString from "lz-string"; // import default evita erros de export
+import { useEffect, useMemo, useState } from "react";
+import LZString from "lz-string";
+import { useLocalStorage } from "./utils/UseLocalStorage";
+import { buildBracket } from "./utils/buildBracket";
+import { autoAdvanceByes } from "./utils/autoAdvanceByes";
+import { deepClone } from "./utils/deepClone";
+import { clearDownstream } from "./utils/clearDownstream";
+import { resolveSlotName } from "./utils/resolveSlotName";
+import { roundLabel } from "./utils/roundLabel";
+import Section from "./components/section";
+import Pill from "./components/Pill";
+import { RoundColumn } from "./components/RoundColumn";
 
-// Pega funções do lz-string de modo compatível
-const {
-  compressToEncodedURIComponent,
-  decompressFromEncodedURIComponent,
-} = LZString;
-
-/**
- * Torneio de Xadrez – Eliminatório (mata-mata)
- * Recursos: identidade (cor/logo), check-in, agendamento de mesas/horários,
- * BO1/BO3, snapshot por link (#view=1&data=...); export/import JSON.
- */
-
+const { compressToEncodedURIComponent, decompressFromEncodedURIComponent } =
+  LZString;
 // ---------- Utils ----------
 const nowISO = () => new Date().toISOString().slice(0, 16);
-
-function shuffle(arr) {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-
-function generateSeedingOrder(size) {
-  let seeds = [1, 2];
-  let s = 2;
-  while (s < size) {
-    const next = [];
-    s *= 2;
-    for (const x of seeds) {
-      next.push(x);
-      next.push(s + 1 - x);
-    }
-    seeds = next;
-  }
-  return seeds;
-}
-
-function deepClone(obj) {
-  return JSON.parse(JSON.stringify(obj));
-}
-
-function useLocalStorage(key, initial) {
-  const [state, setState] = useState(() => {
-    try {
-      const s = localStorage.getItem(key);
-      return s ? JSON.parse(s) : initial;
-    } catch {
-      return initial;
-    }
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem(key, JSON.stringify(state));
-    } catch {}
-  }, [key, state]);
-  return [state, setState];
-}
-
-function resolveSlotName(slot, rounds) {
-  if (!slot) return null;
-  if (slot.name) return slot.name;
-  if (slot.source) {
-    const m = rounds?.[slot.source.roundIndex]?.[slot.source.matchIndex];
-    if (!m) return null;
-    const wIdx = m.winnerIndex;
-    if (wIdx === 0) return resolveSlotName(m.p1, rounds);
-    if (wIdx === 1) return resolveSlotName(m.p2, rounds);
-    if (slot.source.roundIndex === 0)
-      return `Vencedor Pré ${slot.source.matchIndex + 1}`;
-    return `Vencedor R${slot.source.roundIndex + 1} M${
-      slot.source.matchIndex + 1
-    }`;
-  }
-  return null;
-}
-
-function autoAdvanceByes(rounds) {
-  const R = deepClone(rounds);
-  let changed = false;
-  for (let r = 0; r < R.length; r++) {
-    for (let i = 0; i < R[r].length; i++) {
-      const match = R[r][i];
-      if (match.winnerIndex !== -1) continue;
-      const n1 = resolveSlotName(match.p1, R);
-      const n2 = resolveSlotName(match.p2, R);
-      if (n1 && !n2) {
-        match.winnerIndex = 0;
-        changed = true;
-      } else if (!n1 && n2) {
-        match.winnerIndex = 1;
-        changed = true;
-      }
-    }
-  }
-  return { rounds: R, changed };
-}
-
-function clearDownstream(rounds, roundIndex, matchIndex) {
-  const R = deepClone(rounds);
-  for (let r = roundIndex + 1; r < R.length; r++) {
-    for (let m = 0; m < R[r].length; m++) {
-      const mm = R[r][m];
-      const src1 = mm.p1?.source;
-      const src2 = mm.p2?.source;
-      const depends =
-        (src1 &&
-          src1.roundIndex === roundIndex &&
-          src1.matchIndex === matchIndex) ||
-        (src2 &&
-          src2.roundIndex === roundIndex &&
-          src2.matchIndex === matchIndex);
-      if (depends) {
-        mm.winnerIndex = -1;
-        mm.scores = [0, 0];
-        if (!mm.meta) mm.meta = {};
-        const sub = clearDownstream(R, r, m);
-        return sub;
-      }
-    }
-  }
-  return R;
-}
-
-function roundLabel(idx, hasPrelim, baseSize) {
-  if (hasPrelim && idx === 0) return "Pré";
-  const offset = hasPrelim ? 1 : 0;
-  const r = idx - offset;
-  const size = baseSize / Math.pow(2, r);
-  if (size === 2) return "Final";
-  if (size === 4) return "Semifinal";
-  if (size === 8) return "Quartas";
-  if (size === 16) return "Oitavas";
-  return `R${size}`;
-}
-
-function formatTime(iso) {
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return "";
-  }
-}
-
-// ---------- Bracket Builder ----------
-function buildBracket(players, seedingMode = "random") {
-  const clean = players.map((p) => p.trim()).filter(Boolean);
-  if (clean.length === 0) return { rounds: [], baseSize: 0, prelimCount: 0 };
-
-  const n = clean.length;
-  const base =
-    n <= 1 ? 1 : n <= 2 ? 2 : n <= 4 ? 4 : n <= 8 ? 8 : n <= 16 ? 16 : 32;
-  const prelimMatches = n > base ? n - base : 0;
-  const prelimPlayersCount = prelimMatches * 2;
-  const hasPrelim = prelimMatches > 0;
-
-  let seeded;
-  if (seedingMode === "random") {
-    seeded = shuffle(clean).map((name, i) => ({ seed: i + 1, name }));
-  } else {
-    seeded = clean.map((name, i) => ({ seed: i + 1, name }));
-  }
-
-  const directCount = n - prelimPlayersCount;
-  const direct = seeded.slice(0, directCount);
-  const prelimPlayers = seeded.slice(directCount);
-
-  const rounds = [];
-  if (hasPrelim) {
-    const pre = [];
-    for (let i = 0; i < prelimMatches; i++) {
-      const p1 = { name: prelimPlayers[i * 2]?.name || null };
-      const p2 = { name: prelimPlayers[i * 2 + 1]?.name || null };
-      pre.push({ p1, p2, winnerIndex: -1, scores: [0, 0], meta: {} });
-    }
-    rounds.push(pre);
-  }
-
-  const order = generateSeedingOrder(base);
-  const placeholderSeeds = [];
-  for (let i = 0; i < prelimMatches; i++) placeholderSeeds.push(base - i);
-  const placeholderMap = new Map(placeholderSeeds.map((s, i) => [s, i]));
-
-  const seedToSlot = new Map();
-  for (let s = 1; s <= base; s++) {
-    if (placeholderMap.has(s)) {
-      const idx = placeholderMap.get(s);
-      seedToSlot.set(s, { source: { roundIndex: 0, matchIndex: idx } });
-    } else if (s <= direct.length) {
-      seedToSlot.set(s, { name: direct[s - 1].name });
-    } else {
-      seedToSlot.set(s, { name: null });
-    }
-  }
-
-  const firstRound = [];
-  for (let i = 0; i < base / 2; i++) {
-    const sa = order[i * 2];
-    const sb = order[i * 2 + 1];
-    firstRound.push({
-      p1: seedToSlot.get(sa),
-      p2: seedToSlot.get(sb),
-      winnerIndex: -1,
-      scores: [0, 0],
-      meta: {},
-    });
-  }
-  rounds.push(firstRound);
-
-  let currentSize = base / 2;
-  while (currentSize > 1) {
-    const prevIndex = rounds.length - 1;
-    const next = [];
-    for (let i = 0; i < currentSize / 2; i++) {
-      next.push({
-        p1: { source: { roundIndex: prevIndex, matchIndex: i * 2 } },
-        p2: { source: { roundIndex: prevIndex, matchIndex: i * 2 + 1 } },
-        winnerIndex: -1,
-        scores: [0, 0],
-        meta: {},
-      });
-    }
-    rounds.push(next);
-    currentSize = currentSize / 2;
-  }
-
-  return { rounds, baseSize: base, prelimCount: prelimMatches };
-}
-
-// ---------- UI helpers ----------
-function Section({ title, children, right }) {
-  return (
-    <div className="mb-6">
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-xl font-bold tracking-tight">{title}</h2>
-        {right}
-      </div>
-      <div className="bg-white/70 dark:bg-neutral-900/70 rounded-2xl shadow p-4 border border-neutral-200 dark:border-neutral-800">
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function Pill({ children, className = "" }) {
-  return (
-    <span
-      className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 ${className}`}
-    >
-      {children}
-    </span>
-  );
-}
-
-function PlayerButton({ label, disabled, active, onClick, primary }) {
-  const activeStyle = active
-    ? { borderColor: primary, boxShadow: `0 0 0 4px ${primary}33` }
-    : {};
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className={`w-full text-left px-3 py-2 rounded-xl border transition ${
-        active
-          ? "ring-2 bg-white/70 dark:bg-neutral-900/50"
-          : "border-neutral-200 dark:border-neutral-700 hover:border-neutral-400 dark:hover:border-neutral-500 bg-white dark:bg-neutral-900"
-      } disabled:opacity-50 disabled:cursor-not-allowed`}
-      style={activeStyle}
-    >
-      <span className="font-medium truncate block">{label || "(vago)"}</span>
-    </button>
-  );
-}
-
-function ScoreControls({ scores, onWinP1, onWinP2, onReset, disabled }) {
-  return (
-    <div className="mt-2 flex items-center justify-between text-sm">
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          disabled={disabled || scores[0] >= 2}
-          onClick={onWinP1}
-          className="px-2 py-1 rounded-lg border border-neutral-300 dark:border-neutral-700"
-        >
-          Vitória P1
-        </button>
-        <span className="font-mono px-2 py-1 rounded bg-neutral-100 dark:bg-neutral-800">
-          {scores[0]} - {scores[1]}
-        </span>
-        <button
-          type="button"
-          disabled={disabled || scores[1] >= 2}
-          onClick={onWinP2}
-          className="px-2 py-1 rounded-lg border border-neutral-300 dark:border-neutral-700"
-        >
-          Vitória P2
-        </button>
-      </div>
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={onReset}
-        className="px-2 py-1 rounded-lg border border-neutral-300 dark:border-neutral-700"
-      >
-        Reset
-      </button>
-    </div>
-  );
-}
-
-function MatchCard({
-  match,
-  rounds,
-  onPick,
-  onBo3Win,
-  onBo3Reset,
-  roundIndex,
-  matchIndex,
-  bo3,
-  readOnly,
-  primary,
-}) {
-  const n1 = resolveSlotName(match.p1, rounds);
-  const n2 = resolveSlotName(match.p2, rounds);
-  const ready = Boolean(n1 && n2);
-  const mesa = match.meta?.table;
-  const horario = match.meta?.timeISO;
-  return (
-    <div className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-gradient-to-br from-white to-neutral-50 dark:from-neutral-950 dark:to-neutral-900 shadow-sm p-3">
-      <div className="flex items-center justify-between mb-2">
-        <Pill>Partida {matchIndex + 1}</Pill>
-        <div className="flex items-center gap-2">
-          {mesa && (
-            <Pill className="border-blue-200 dark:border-blue-800">
-              Mesa {mesa}
-            </Pill>
-          )}
-          {horario && (
-            <Pill className="border-amber-200 dark:border-amber-800">
-              {formatTime(horario)}
-            </Pill>
-          )}
-          {match.winnerIndex !== -1 && (
-            <Pill className="bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800">
-              Vencedor escolhido
-            </Pill>
-          )}
-        </div>
-      </div>
-      <div className="space-y-2">
-        <PlayerButton
-          label={n1}
-          disabled={!n1 || !ready || readOnly || (bo3 && true)}
-          active={match.winnerIndex === 0}
-          onClick={() => onPick(roundIndex, matchIndex, 0)}
-          primary={primary}
-        />
-        <PlayerButton
-          label={n2}
-          disabled={!n2 || !ready || readOnly || (bo3 && true)}
-          active={match.winnerIndex === 1}
-          onClick={() => onPick(roundIndex, matchIndex, 1)}
-          primary={primary}
-        />
-        {bo3 && (
-          <ScoreControls
-            scores={match.scores || [0, 0]}
-            onWinP1={() => onBo3Win(roundIndex, matchIndex, 0)}
-            onWinP2={() => onBo3Win(roundIndex, matchIndex, 1)}
-            onReset={() => onBo3Reset(roundIndex, matchIndex)}
-            disabled={!ready || readOnly || match.winnerIndex !== -1}
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-
-function RoundColumn({
-  title,
-  matches,
-  rounds,
-  roundIndex,
-  onPick,
-  onBo3Win,
-  onBo3Reset,
-  bo3,
-  readOnly,
-  primary,
-}) {
-  return (
-    <div className="min-w-[280px] w-[300px] flex-shrink-0">
-      <div
-        className="sticky top-0 z-10 backdrop-blur border-b border-neutral-200 dark:border-neutral-800 py-2 mb-3"
-        style={{
-          background:
-            "linear-gradient( to right, rgba(255,255,255,0.7), rgba(255,255,255,0.3))",
-        }}
-      >
-        <h3 className="text-sm font-semibold tracking-wide uppercase text-neutral-600 dark:text-neutral-300">
-          {title}
-        </h3>
-      </div>
-      <div className="flex flex-col gap-4">
-        {matches.map((m, i) => (
-          <MatchCard
-            key={i}
-            match={m}
-            rounds={rounds}
-            roundIndex={roundIndex}
-            matchIndex={i}
-            onPick={onPick}
-            onBo3Win={onBo3Win}
-            onBo3Reset={onBo3Reset}
-            bo3={bo3}
-            readOnly={readOnly}
-            primary={primary}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
 
 // ---------- App ----------
 export default function App() {
@@ -460,7 +49,6 @@ export default function App() {
   const [shareOpen, setShareOpen] = useState(false);
   const [shareURL, setShareURL] = useState("");
 
-  // Leitura de snapshot (quando se abre um link #view=1&data=...)
   useEffect(() => {
     const hash = window.location.hash?.slice(1) || "";
     const params = new URLSearchParams(hash);
@@ -482,7 +70,10 @@ export default function App() {
 
   // Sincroniza check-in a partir do textarea
   function syncPlayersFromRaw() {
-    const names = rawNames.split("\n").map((n) => n.trim()).filter(Boolean);
+    const names = rawNames
+      .split("\n")
+      .map((n) => n.trim())
+      .filter(Boolean);
     const map = new Map(players.map((p) => [p.name, p.present]));
     const merged = names.map((n) => ({
       name: n,
@@ -495,7 +86,10 @@ export default function App() {
   function generate() {
     const list = players.length
       ? players.filter((p) => p.present).map((p) => p.name)
-      : rawNames.split("\n").map((n) => n.trim()).filter(Boolean);
+      : rawNames
+          .split("\n")
+          .map((n) => n.trim())
+          .filter(Boolean);
 
     const res = buildBracket(list, settings.seedingMode);
     let { rounds } = res;
@@ -617,7 +211,8 @@ export default function App() {
 
   function uploadLogo(file) {
     const reader = new FileReader();
-    reader.onload = () => setSettings((s) => ({ ...s, logoDataUrl: reader.result }));
+    reader.onload = () =>
+      setSettings((s) => ({ ...s, logoDataUrl: reader.result }));
     reader.readAsDataURL(file);
   }
 
@@ -663,8 +258,8 @@ export default function App() {
                 {settings.title}
               </h1>
               <p className="text-neutral-600 dark:text-neutral-300">
-                Mata-mata com pré-eliminatória automática, check-in,
-                agendamento e compartilhamento por link.
+                Mata-mata com pré-eliminatória automática, check-in, agendamento
+                e compartilhamento por link.
               </p>
             </div>
           </div>
@@ -722,14 +317,20 @@ export default function App() {
                     type="color"
                     value={settings.primaryColor}
                     onChange={(e) =>
-                      setSettings((s) => ({ ...s, primaryColor: e.target.value }))
+                      setSettings((s) => ({
+                        ...s,
+                        primaryColor: e.target.value,
+                      }))
                     }
                   />
                   <input
                     className="flex-1 rounded-xl border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-3 py-2 font-mono"
                     value={settings.primaryColor}
                     onChange={(e) =>
-                      setSettings((s) => ({ ...s, primaryColor: e.target.value }))
+                      setSettings((s) => ({
+                        ...s,
+                        primaryColor: e.target.value,
+                      }))
                     }
                   />
                 </div>
@@ -792,9 +393,10 @@ export default function App() {
                     type="button"
                     onClick={() =>
                       setRawNames(
-                        Array.from({ length: 34 }, (_, i) => `Jogador ${i + 1}`).join(
-                          "\n"
-                        )
+                        Array.from(
+                          { length: 34 },
+                          (_, i) => `Jogador ${i + 1}`
+                        ).join("\n")
                       )
                     }
                     className="px-4 py-2 rounded-xl border border-neutral-300 dark:border-neutral-700"
@@ -816,7 +418,9 @@ export default function App() {
                           onChange={(e) =>
                             setPlayers((pl) =>
                               pl.map((x, i) =>
-                                i === idx ? { ...x, present: e.target.checked } : x
+                                i === idx
+                                  ? { ...x, present: e.target.checked }
+                                  : x
                               )
                             )
                           }
@@ -830,7 +434,9 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() =>
-                        setPlayers((pl) => pl.map((x) => ({ ...x, present: true })))
+                        setPlayers((pl) =>
+                          pl.map((x) => ({ ...x, present: true }))
+                        )
                       }
                       className="px-3 py-2 rounded-xl border border-neutral-300 dark:border-neutral-700"
                     >
@@ -839,7 +445,9 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() =>
-                        setPlayers((pl) => pl.map((x) => ({ ...x, present: false })))
+                        setPlayers((pl) =>
+                          pl.map((x) => ({ ...x, present: false }))
+                        )
                       }
                       className="px-3 py-2 rounded-xl border border-neutral-300 dark:border-neutral-700"
                     >
@@ -902,14 +510,20 @@ export default function App() {
               </div>
             </Section>
 
-            <Section title="Regras e agendamento" right={<Pill>{settings.bo3 ? "BO3" : "BO1"}</Pill>}>
+            <Section
+              title="Regras e agendamento"
+              right={<Pill>{settings.bo3 ? "BO3" : "BO1"}</Pill>}
+            >
               <div className="space-y-3">
                 <div className="flex items-center gap-3">
                   <label className="text-sm w-32">Formato da partida</label>
                   <select
                     value={settings.bo3 ? "bo3" : "bo1"}
                     onChange={(e) =>
-                      setSettings((s) => ({ ...s, bo3: e.target.value === "bo3" }))
+                      setSettings((s) => ({
+                        ...s,
+                        bo3: e.target.value === "bo3",
+                      }))
                     }
                     className="rounded-xl border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-3 py-2"
                   >
@@ -987,8 +601,9 @@ export default function App() {
                   </button>
                 </div>
                 <p className="text-xs text-neutral-500">
-                  O agendamento percorre as rodadas, distribui partidas nas mesas e
-                  calcula horários por blocos, com intervalo entre rodadas.
+                  O agendamento percorre as rodadas, distribui partidas nas
+                  mesas e calcula horários por blocos, com intervalo entre
+                  rodadas.
                 </p>
               </div>
             </Section>
@@ -1013,11 +628,24 @@ export default function App() {
 
             <Section title="Ajuda rápida">
               <ol className="list-decimal list-inside space-y-1 text-sm text-neutral-700 dark:text-neutral-300">
-                <li>Sincronize a lista com <strong>check-in</strong> e gere as chaves.</li>
-                <li>Escolha <strong>BO1</strong> ou <strong>BO3</strong>.</li>
-                <li>Use <strong>Agendar rodadas</strong> para mesas/horários.</li>
-                <li>No BO1, clique no nome do vencedor. No BO3, registre vitórias parciais até 2.</li>
-                <li>Compartilhe pelo <strong>link</strong> (snapshot em modo leitura).</li>
+                <li>
+                  Sincronize a lista com <strong>check-in</strong> e gere as
+                  chaves.
+                </li>
+                <li>
+                  Escolha <strong>BO1</strong> ou <strong>BO3</strong>.
+                </li>
+                <li>
+                  Use <strong>Agendar rodadas</strong> para mesas/horários.
+                </li>
+                <li>
+                  No BO1, clique no nome do vencedor. No BO3, registre vitórias
+                  parciais até 2.
+                </li>
+                <li>
+                  Compartilhe pelo <strong>link</strong> (snapshot em modo
+                  leitura).
+                </li>
               </ol>
             </Section>
           </div>
@@ -1051,7 +679,10 @@ export default function App() {
         </div>
 
         <footer className="mt-8 text-xs text-neutral-500 flex items-center justify-between">
-          <span>Feito para torneios escolares · Funciona offline · Dark mode automático</span>
+          <span>
+            Feito para torneios escolares · Funciona offline · Dark mode
+            automático
+          </span>
           <a
             href="#"
             onClick={(e) => {
@@ -1085,7 +716,9 @@ export default function App() {
                 </button>
               </div>
 
-              <label className="block text-sm mb-1">Link (somente leitura):</label>
+              <label className="block text-sm mb-1">
+                Link (somente leitura):
+              </label>
               <input
                 readOnly
                 value={shareURL}
@@ -1120,8 +753,8 @@ export default function App() {
               </div>
 
               <p className="mt-2 text-xs text-neutral-500">
-                O link abre um snapshot do torneio em modo leitura. Se atualizar resultados,
-                gere um novo link.
+                O link abre um snapshot do torneio em modo leitura. Se atualizar
+                resultados, gere um novo link.
               </p>
             </div>
           </div>
